@@ -1,6 +1,6 @@
 # LinkedIn Profile Scraper — Proje Notları & Devam Rehberi
 
-> Son güncelleme: 2026-08-07
+> Son güncelleme: 2026-08-25
 > Repo: `Xtra01/scrapinling` — branch: `claude/linkedin-profile-scraper-ejvUZ`
 > Amaç: 15.000 LinkedIn linkinden **tüm iş deneyimi + eğitim bilgilerini** yasal API'lerle eksiksiz çekmek.
 
@@ -72,8 +72,13 @@ Async (batch, büyük hacimler, 1GB'a kadar input):
 - Resmi Python SDK yok, sadece REST
 
 ### Test Edilmesi Gerekenler
-- Kod tam yazıldı ama **gerçek API key ile hiç test edilmedi**
-- Scrapingdog, Netrows, LinkdAPI, ScrapIn, RocketReach response parse mantığı dokümantasyon+üçüncü parti kaynaklardan tahmine dayalı, gerçek alan adları farklı çıkabilir
+- Kod tam yazıldı, **75 pytest testiyle** (mock JSON fixture'larla, network olmadan)
+  parse mantığı doğrulandı — ama **gerçek API key ile hiç test edilmedi**
+- Scrapingdog, Netrows, LinkdAPI, ScrapIn, RocketReach response parse mantığı
+  dokümantasyon+üçüncü parti kaynaklardan tahmine dayalı (kendi pytest dosyaları da
+  var: `tests/test_other_clients_parse.py`, 35 test), gerçek alan adları farklı
+  çıkabilir — ama artık None-safe olduğu için farklılık crash yerine sessiz boş
+  değere düşer
 
 ### Yasal Emsal
 1. **hiQ v. LinkedIn (2017-2022)**: 9. Daire, public veri scraping'in CFAA ihlali olmadığına hükmetti
@@ -101,8 +106,16 @@ scrapinling/
 │   ├── storage.py                   SQLite checkpoint, CSV/JSON writers
 │   ├── validators.py                URL yükleme+normalize+validate
 │   └── progress.py                  Rich progress bar
+├── tests/                           235 pytest testi (network gerektirmez)
+│   ├── test_models.py               53 test
+│   ├── test_validators.py           41 test
+│   ├── test_storage.py              29 test
+│   ├── test_brightdata_client.py    76 test
+│   └── test_other_clients_parse.py  35 test (+ ScrapingdogClient is_current)
+├── examples/                        Hazır örnek input dosyaları
 ├── .env.example
 ├── requirements.txt
+├── requirements-dev.txt             + pytest, pytest-asyncio, aioresponses
 ├── LICENSE                          MIT — Copyright (c) 2026 Xtra01
 └── README.md
 ```
@@ -120,34 +133,90 @@ CSV/TXT input → validators.py (normalize+dedupe)
 
 ### Resume/Checkpoint
 - SQLite `job_status` tablosu: pending/in_progress/success/failed/not_found
-- `python main.py scrape --resume` (varsayılan açık) → sadece bekleyenleri işler
+- `python main.py scrape --resume` (varsayılan açık) → pending/retry/**failed**
+  URL'lerini işler; success ve not_found atlanır
+- `in_progress`'te takılı kalan satırlar (işlem yarıda kesilirse) otomatik
+  `retry`'e self-heal edilir, kalıcı kaybolmazlar
 
 ---
 
-## 5. Bilinmeyen Riskler / Yapılmadı
+## 5. Sağlamlaştırma Geçişi (2026-08-25) — 235 testlik pytest suite + 29 hata düzeltmesi
 
-1. **Hiçbir API gerçek key ile test edilmedi** — syntax doğru (`py_compile` geçti) ama gerçek response formatı doğrulanmadı
+Kullanıcı "kaldığın yerden devam et, eksiksiz iş yap" dediğinde, ultracode açık
+olduğu için 17 agent'lık bir **review → verify → test** workflow'u çalıştırıldı:
+
+- **6 review agent**: her biri kod tabanının bir bölümünü (`models.py`, `engine.py`,
+  `brightdata_client.py`, diğer 6 client, `storage.py`, `validators.py`+`main.py`)
+  gerçek mantık hataları için tarad. 26 aday bulgu üretti.
+- **6 verify agent**: her bulguyu kaynak koddan bağımsızca tekrar okuyup
+  CONFIRMED/REJECTED kararı verdi. **26/26 CONFIRMED** (yanlış pozitif çıkmadı).
+- **5 test-writing agent**: `tests/` altına network gerektirmeyen, gerçek SQLite/
+  CSV/JSON I/O kullanan **235 testlik pytest suite** yazdı (`test_models.py`,
+  `test_validators.py`, `test_storage.py`, `test_brightdata_client.py`,
+  `test_other_clients_parse.py`). Test agent'lar ayrıca kendi başlarına 2 ek hata
+  buldu (bonus, formal 26 listede değildi).
+
+Ardından **tüm 26 + 2 bonus + 1 kendi smoke-test'imle bulduğum design gap = 29 hata**
+tek tek elle düzeltildi, testler doğru davranışı doğrulayacak şekilde güncellendi,
+tam suite yeşile getirildi (`python -m pytest tests/ -q` → **235 passed**), gerçek
+network olmadan sahte client ile uçtan uca smoke test yapıldı (engine→storage→CSV/
+JSONL wiring + exception-safety + resume davranışı doğrulandı).
+
+### Düzeltilen kritik hata sınıfları
+
+| Dosya | Hata sayısı | Örnekler |
+|-------|-------------|----------|
+| `scraper/models.py` | 4 | `from_pdl` None-crash, ay/gün kaybı, `to_flat_rows` boş `record_type` |
+| `scraper/engine.py` | 3 | exception-safety eksikliği, Bright Data URL reconciliation |
+| `scraper/brightdata_client.py` | 7 | **URL substring collision (veri karışması, HIGH)**, gather exception yutma, 401/403'te 2 saat boşuna polling, K/M suffix, bare "Present", float yıl, dil dict sızıntısı |
+| `scraper/scrapin_client.py` | 3 | positions/schools/firstName None-crash, skills filtresizliği |
+| `scraper/scrapingdog_client.py` | 1 | is_current mantık tersine dönmesi |
+| 6 client (Retry-After) | 6 | HTTP-date değerinde `int()` çökmesi → retry yerine kalıcı hata |
+| `scraper/rocketreach_client.py` | 1 | eğitim yılları int'e çevrilmiyordu |
+| `utils/storage.py` | 3 | **in_progress kalıcı kayıp (HIGH)**, get_stats eksik sayım, DELETE sadece success'te |
+| `utils/validators.py` | 3 | case-insensitive dedup eksikliği, anchor'sız regex, CSV restkey crash |
+| **Bonus (benim bulduğum)** | 1 | **`--resume` "failed" URL'leri asla tekrar denemiyordu** — 15k ölçekte geçici hatalar için kritik |
+
+En kritik ikisi: (1) Bright Data'da bir URL diğerinin substring'iyse (örn. `/in/john`
+vs `/in/john-smith`) veri yanlış kişiye yazılıyordu — artık exact-match-first mantığı
+var. (2) `job_status` "in_progress"te takılı kalan satırlar hiçbir zaman resume
+edilmiyordu — artık self-heal ediliyor.
+
+Detaylı liste, her hatanın verify agent tarafından yazılan tam gerekçesi ve
+suggested_fix'i workflow transcript'inde (`journal.jsonl`) mevcut; commit mesajı
+`a2d0679`de dosya dosya özetlendi.
+
+### Hâlâ Bilinmeyen Riskler
+
+1. **Hiçbir API gerçek key ile test edilmedi** — parse mantığı artık None-safe ve
+   testlerle korunuyor, ama gerçek alan adlarının dokümantasyonla/üçüncü parti
+   kaynaklarla birebir eşleştiği hiç doğrulanmadı. Bu, kabul edilmiş bir sınırdır.
 2. **LinkedIn URL formatı** — sadece `linkedin.com/in/...`, şirket sayfaları desteklenmiyor
 3. **15k URL'lik gerçek test dosyası henüz verilmedi**
-4. **Yerel git push bu ortamda çalışmıyordu** (403) — teslimat GitHub MCP `push_files`/`create_branch` araclarıyla yapıldı
 
 ---
 
 ## 6. Sıradaki Adımlar
 
 1. Kullanıcıdan gerçek API key'lerini iste (Scrapingdog/Netrows en ucuz başlangıç)
-2. Küçük test seti (10-20 URL) ile gerçek response'ları doğrula, parser düzelt
+2. Küçük test seti (10-20 URL) ile gerçek response'ları doğrula — artık parser'lar
+   None-safe olduğu için beklenmedik alan adı farklılıkları crash değil, sessizce
+   boş/varsayılan değer üretir; yine de alan eşlemesini gözden geçirmek gerekir
 3. 15.000 linkin bulunduğu CSV/TXT dosyasını al
 4. `python main.py scrape --input <dosya>` çalıştır
 5. Sonuçları `data/output/profiles.csv` + `profiles.jsonl` olarak teslim et
+
+Test suite'i çalıştırmak için: `pip install -r requirements-dev.txt && pytest tests/ -v`
 
 ---
 
 ## 7. Genel Püf Noktaları
 
 - CSV input sütun adı: `linkedin_url`, `linkedin`, `url`, `profile_url`, `link` — otomatik algılanıyor
-- URL normalize otomatik: `http://`→`https://`, `linkedin.com`→`www.linkedin.com`, dedupe
-- CSV output: her satırda 1 experience VEYA 1 education kaydı (`record_type` ile ayırt edilir)
+- URL normalize otomatik: `http://`→`https://`, `linkedin.com`→`www.linkedin.com`, dedupe (artık case-insensitive)
+- CSV output: her satırda 1 experience VEYA 1 education kaydı (`record_type` ile ayırt edilir; boş profilde `record_type="profile"`)
 - JSON Lines output: her satırda TAM profil (nested array'lerle)
+- `--resume` artık "failed" URL'leri de tekrar dener (sadece "not_found" ve "success" atlanır)
 - `.env` asla commit edilmez (`.gitignore`'da)
 - Proje MIT lisanslı, "Copyright (c) 2026 Xtra01"
+- `examples/sample_links.csv` ve `examples/sample_links.txt` — hazır örnek input dosyaları
