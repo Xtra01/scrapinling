@@ -17,15 +17,27 @@ LINKEDIN_URL_PATTERN = re.compile(
 
 def normalize_linkedin_url(url: str) -> str:
     """Normalize a LinkedIn URL to canonical form."""
-    url = url.strip().rstrip("/")
-    url = re.sub(r"^http://", "https://", url)
-    url = re.sub(r"https://linkedin\.com/", "https://www.linkedin.com/", url)
+    url = url.strip()
+    # Case-insensitively canonicalize scheme + host in one pass, so
+    # "HTTP://LinkedIn.com/..." and "https://www.linkedin.com/..." collapse
+    # to the same prefix (mixed-case duplicates were previously evading dedup).
+    url = re.sub(
+        r"^(https?)://(www\.)?linkedin\.com/",
+        "https://www.linkedin.com/",
+        url,
+        flags=re.IGNORECASE,
+    )
+    # Strip query string/fragment BEFORE stripping the trailing slash, so
+    # ".../john/?trk=x" and ".../john?trk=x" normalize identically.
     url = url.split("?")[0].split("#")[0]
+    url = url.rstrip("/")
     return url
 
 
 def is_valid_linkedin_url(url: str) -> bool:
-    return bool(LINKEDIN_URL_PATTERN.match(url))
+    # fullmatch (not match) so trailing garbage after a valid-looking prefix
+    # is rejected instead of silently accepted.
+    return bool(LINKEDIN_URL_PATTERN.fullmatch(url))
 
 
 def load_urls_from_file(path: str) -> list[str]:
@@ -86,7 +98,11 @@ def _load_from_csv(path: str) -> Generator[str, None, None]:
         if col is None:
             for row in reader:
                 for val in row.values():
-                    if val and "linkedin.com/in/" in val.lower():
+                    # csv.DictReader stores any extra fields beyond the header
+                    # count (e.g. an unescaped comma in a data row) under the
+                    # restkey as a list, not a string — skip those instead of
+                    # crashing on .lower().
+                    if isinstance(val, str) and val and "linkedin.com/in/" in val.lower():
                         yield val.strip()
             return
 

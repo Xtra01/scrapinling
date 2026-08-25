@@ -89,7 +89,10 @@ class RocketReachClient:
                 return profile
 
             elif response.status == 429:
-                retry_after = int(response.headers.get("Retry-After", 60))
+                try:
+                    retry_after = int(response.headers.get("Retry-After", 60))
+                except (TypeError, ValueError):
+                    retry_after = 60
                 logger.warning("RocketReach rate limited, waiting %ds...", retry_after)
                 await asyncio.sleep(retry_after)
                 raise RocketReachRateLimitError("Rate limited (429)")
@@ -128,12 +131,14 @@ class RocketReachClient:
         for edu in (data.get("education") or []):
             if not edu:
                 continue
+            edu_start = str(edu.get("start") or "")
+            edu_end = str(edu.get("end") or "")
             ed = Education(
                 school=edu.get("school") or "",
                 degree=edu.get("degree") or "",
                 field_of_study=edu.get("major") or "",
-                starts_at_year=edu.get("start"),
-                ends_at_year=edu.get("end"),
+                starts_at_year=int(edu_start[:4]) if edu_start[:4].isdigit() else None,
+                ends_at_year=int(edu_end[:4]) if edu_end[:4].isdigit() else None,
             )
             education.append(ed)
 

@@ -130,13 +130,22 @@ class BrightDataClient:
 
         async def process_batch(batch: list[str]):
             async with batch_semaphore:
-                batch_results = await self._trigger_and_collect(batch)
+                try:
+                    batch_results = await self._trigger_and_collect(batch)
+                except Exception as e:
+                    logger.error("BrightData: batch of %d failed entirely: %s", len(batch), e)
+                    batch_results = self._make_error_results(batch, str(e))
                 for url, profile in batch_results.items():
                     results[url] = profile
                     if on_result:
                         on_result(profile)
 
-        await asyncio.gather(*[process_batch(b) for b in batches], return_exceptions=True)
+        gather_results = await asyncio.gather(
+            *[process_batch(b) for b in batches], return_exceptions=True
+        )
+        for exc in gather_results:
+            if isinstance(exc, Exception):
+                logger.error("BrightData: unexpected batch-task exception: %s", exc)
         return results
 
     async def _trigger_and_collect(self, urls: list[str]) -> dict[str, LinkedInProfile]:
@@ -179,6 +188,7 @@ class BrightDataClient:
         progress_url = f"{PROGRESS_URL}/{snapshot_id}"
         deadline = time.time() + POLL_TIMEOUT_SEC
         raw = None
+        consecutive_not_found = 0
 
         while time.time() < deadline:
             await asyncio.sleep(POLL_INTERVAL_SEC)
@@ -189,12 +199,29 @@ class BrightDataClient:
                     timeout=aiohttp.ClientTimeout(total=15),
                 ) as presp:
                     if presp.status == 200:
+                        consecutive_not_found = 0
                         prog = await presp.json()
                         status = prog.get("status", "")
                         logger.debug("BrightData: %s status=%s", snapshot_id, status)
                         if status in _FAILED_STATUSES:
                             logger.warning("BrightData: batch %s → %s", snapshot_id, status)
                             return self._make_error_results(urls, f"Batch {status}")
+                    elif presp.status in (401, 403):
+                        # Terminal, cheaply detectable — don't poll for 2 hours
+                        # to eventually report a generic timeout instead.
+                        logger.error("BrightData: auth/credits failure while polling %s (HTTP %d)",
+                                     snapshot_id, presp.status)
+                        return self._make_error_results(
+                            urls, f"Auth/credits failure while polling (HTTP {presp.status})"
+                        )
+                    elif presp.status == 404:
+                        consecutive_not_found += 1
+                        if consecutive_not_found >= 3:
+                            logger.error("BrightData: snapshot %s not found after %d checks",
+                                         snapshot_id, consecutive_not_found)
+                            return self._make_error_results(urls, "Snapshot not found (404)")
+                    else:
+                        logger.debug("BrightData: progress HTTP %d for %s", presp.status, snapshot_id)
             except Exception as e:
                 logger.debug("BrightData: progress check error: %s", e)
 
@@ -208,6 +235,12 @@ class BrightDataClient:
                         break
                     elif dresp.status == 202:
                         continue  # Still in progress
+                    elif dresp.status in (401, 403):
+                        logger.error("BrightData: auth/credits failure downloading %s (HTTP %d)",
+                                     snapshot_id, dresp.status)
+                        return self._make_error_results(
+                            urls, f"Auth/credits failure on download (HTTP {dresp.status})"
+                        )
                     else:
                         text = await dresp.text()
                         logger.warning("BrightData: download HTTP %d: %s", dresp.status, text[:200])
@@ -223,14 +256,25 @@ class BrightDataClient:
         if not isinstance(raw, list):
             raw = [raw]
 
-        # Parse each result item and match back to input URLs
+        # Parse each result item and match back to input URLs.
+        # Exact match first (the common case). Only fall back to substring
+        # matching for a normalization mismatch, and even then: only consider
+        # URLs not already claimed by an exact match, and prefer the longest
+        # (most specific) candidate — this avoids one URL being a substring
+        # of another (e.g. .../in/john vs .../in/john-smith) silently
+        # colliding onto the shorter one.
+        url_set = set(urls)
         results: dict[str, LinkedInProfile] = {}
         for item in raw:
             input_url = item.get("input_url") or item.get("url") or ""
-            matched_url = next(
-                (u for u in urls if input_url in u or u in input_url),
-                input_url or None,
-            )
+            if input_url in url_set:
+                matched_url = input_url
+            else:
+                candidates = [
+                    u for u in urls
+                    if u not in results and (input_url in u or u in input_url)
+                ]
+                matched_url = max(candidates, key=len) if candidates else (input_url or None)
             if not matched_url:
                 continue
             if item.get("error"):
@@ -238,7 +282,13 @@ class BrightDataClient:
                 profile.fetch_status = "not_found"
                 profile.error_message = str(item["error"])
             else:
-                profile = self._parse_response(matched_url, item)
+                try:
+                    profile = self._parse_response(matched_url, item)
+                except Exception as e:
+                    logger.warning("BrightData: failed to parse item for %s: %s", matched_url, e)
+                    profile = LinkedInProfile(linkedin_url=matched_url, source_api="brightdata")
+                    profile.fetch_status = "failed"
+                    profile.error_message = f"Parse error: {e}"
             results[matched_url] = profile
 
         for url in urls:
@@ -355,12 +405,6 @@ class BrightDataClient:
             if isinstance(edu, str):
                 education.append(Education(school=edu))
                 continue
-            starts_year = edu.get("start_year") or edu.get("from_year")
-            ends_year = edu.get("end_year") or edu.get("to_year")
-            if isinstance(starts_year, str) and starts_year.isdigit():
-                starts_year = int(starts_year)
-            if isinstance(ends_year, str) and ends_year.isdigit():
-                ends_year = int(ends_year)
             ed = Education(
                 school=edu.get("school") or edu.get("school_name") or "",
                 school_linkedin_url=edu.get("school_linkedin_url") or "",
@@ -369,8 +413,8 @@ class BrightDataClient:
                 description=edu.get("description") or "",
                 grade=edu.get("grade") or str(edu.get("gpa", "")) or "",
                 activities=edu.get("activities") or edu.get("activities_and_societies") or "",
-                starts_at_year=starts_year if isinstance(starts_year, int) else None,
-                ends_at_year=ends_year if isinstance(ends_year, int) else None,
+                starts_at_year=_coerce_year(edu.get("start_year") or edu.get("from_year")),
+                ends_at_year=_coerce_year(edu.get("end_year") or edu.get("to_year")),
             )
             education.append(ed)
 
@@ -381,7 +425,7 @@ class BrightDataClient:
         ]
 
         languages = [
-            (lang.get("name") or lang.get("language") or lang)
+            (lang.get("name") or lang.get("language") or "")
             if isinstance(lang, dict) else lang
             for lang in (data.get("languages") or [])
         ]
@@ -445,6 +489,9 @@ def _parse_duration(duration: str):
     if not duration:
         return None, None, None, None, False
 
+    if duration.strip().lower() == "present":
+        return None, None, None, None, True
+
     duration = duration.replace("–", "-").replace("—", "-")
     parts = [p.strip() for p in duration.split("-")]
     if len(parts) < 2:
@@ -470,12 +517,32 @@ def _parse_duration(duration: str):
     return start_year, start_month, end_year, end_month, is_current
 
 
+def _coerce_year(v) -> Optional[int]:
+    """Accept an int, float, or numeric string year; reject bool/garbage."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return int(v)
+    if isinstance(v, str) and v.strip().isdigit():
+        return int(v.strip())
+    return None
+
+
 def _parse_int(val) -> Optional[int]:
     if val is None:
         return None
+    if isinstance(val, str):
+        cleaned = val.replace(",", "").replace("+", "").strip()
+        multiplier = 1
+        if cleaned[-1:].upper() == "K":
+            multiplier, cleaned = 1_000, cleaned[:-1]
+        elif cleaned[-1:].upper() == "M":
+            multiplier, cleaned = 1_000_000, cleaned[:-1]
+        try:
+            return int(float(cleaned) * multiplier)
+        except (ValueError, TypeError):
+            return None
     try:
-        if isinstance(val, str):
-            val = val.replace(",", "").replace("+", "").replace("K", "000").strip()
         return int(val)
     except (ValueError, TypeError):
         return None

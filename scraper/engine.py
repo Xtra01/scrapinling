@@ -115,7 +115,8 @@ class ScraperEngine:
     ) -> list[str]:
         """
         Run Bright Data batch fetching on all URLs.
-        Returns list of URLs that failed and need retry via standard pipeline.
+        Returns list of URLs that failed (or never reported a result) and
+        need retry via the standard pipeline.
         """
         semaphore = asyncio.Semaphore(self.concurrency)
         bd_client = BrightDataClient(self.brightdata_key, session, semaphore)
@@ -124,9 +125,16 @@ class ScraperEngine:
         task_id = progress.add_task("Bright Data (batch)", total=len(urls), rate=0.0)
 
         failed_urls = []
+        seen_urls = set()
 
         def on_result(profile: LinkedInProfile):
-            self._persist(profile)
+            seen_urls.add(profile.linkedin_url)
+            try:
+                self._persist(profile)
+            except Exception as e:
+                logger.error("Failed to persist %s: %s", profile.linkedin_url, e)
+                profile.fetch_status = "failed"
+                profile.error_message = f"Persist error: {e}"
             self.stats.update(profile.fetch_status)
             progress.update(task_id, advance=1, rate=self.stats.rate)
             if profile.fetch_status != "success":
@@ -134,6 +142,16 @@ class ScraperEngine:
 
         with progress:
             await bd_client.bulk_fetch(urls, on_result=on_result)
+
+        # bulk_fetch/on_result should cover every URL, but if an unexpected
+        # exception anywhere in the batch pipeline dropped one silently,
+        # don't let it vanish — route it through Phase 2 as a retry too.
+        missing = [u for u in urls if u not in seen_urls]
+        if missing:
+            logger.warning(
+                "%d URL(s) never reported a result from Bright Data — queuing for retry", len(missing)
+            )
+            failed_urls.extend(missing)
 
         console.print(
             f"[cyan]Bright Data complete:[/cyan] "
@@ -179,36 +197,49 @@ class ScraperEngine:
                 await asyncio.gather(*tasks[i: i + batch_size], return_exceptions=True)
 
     async def _process_url(self, url: str, clients: list, progress, task_id):
-        self.db.mark_in_progress(url)
+        """
+        Fetch, persist, and account for one URL. The whole body is guarded so
+        that a failure anywhere (DB error, disk-full on CSV flush, an unhandled
+        client exception) still results in exactly one stats/progress update
+        instead of silently vanishing from asyncio.gather(return_exceptions=True).
+        """
         profile: Optional[LinkedInProfile] = None
+        try:
+            self.db.mark_in_progress(url)
 
-        for client in clients:
-            try:
-                profile = await client.fetch_profile(url)
-                await asyncio.sleep(self.request_delay)
-                if profile.fetch_status == "success":
-                    break
-            except Exception as e:
-                logger.warning("%s failed for %s: %s", type(client).__name__, url, e)
-                continue
+            for client in clients:
+                try:
+                    profile = await client.fetch_profile(url)
+                    await asyncio.sleep(self.request_delay)
+                    if profile.fetch_status == "success":
+                        break
+                except Exception as e:
+                    logger.warning("%s failed for %s: %s", type(client).__name__, url, e)
+                    continue
 
-        if profile is None:
+            if profile is None:
+                profile = LinkedInProfile(linkedin_url=url, source_api="none")
+                profile.fetch_status = "failed"
+                profile.error_message = "No API client configured or all failed"
+
+            self._persist(profile)
+
+            if profile.fetch_status == "success":
+                logger.debug("[OK] %s → %s | %d exp, %d edu | %s",
+                             url, profile.full_name,
+                             len(profile.experiences), len(profile.education),
+                             profile.source_api)
+            else:
+                logger.debug("[%s] %s → %s",
+                             profile.fetch_status.upper(), url, profile.error_message)
+        except Exception as e:
+            logger.error("Unhandled error processing %s: %s", url, e)
             profile = LinkedInProfile(linkedin_url=url, source_api="none")
             profile.fetch_status = "failed"
-            profile.error_message = "No API client configured or all failed"
-
-        self._persist(profile)
-        self.stats.update(profile.fetch_status)
-        progress.update(task_id, advance=1, rate=self.stats.rate)
-
-        if profile.fetch_status == "success":
-            logger.debug("[OK] %s → %s | %d exp, %d edu | %s",
-                         url, profile.full_name,
-                         len(profile.experiences), len(profile.education),
-                         profile.source_api)
-        else:
-            logger.debug("[%s] %s → %s",
-                         profile.fetch_status.upper(), url, profile.error_message)
+            profile.error_message = f"Unhandled error: {e}"
+        finally:
+            self.stats.update(profile.fetch_status if profile else "failed")
+            progress.update(task_id, advance=1, rate=self.stats.rate)
 
     def _persist(self, profile: LinkedInProfile):
         """Write to SQLite, CSV, and JSON Lines."""

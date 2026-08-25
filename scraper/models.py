@@ -7,6 +7,21 @@ from typing import Optional
 import json
 
 
+def _split_ymd(date_str: Optional[str]):
+    """Parse a PDL-style 'YYYY-MM-DD' / 'YYYY-MM' / 'YYYY' string into (year, month, day)."""
+    if not date_str:
+        return None, None, None
+    parts = str(date_str).split("-")
+
+    def as_int(i):
+        try:
+            return int(parts[i])
+        except (IndexError, ValueError):
+            return None
+
+    return as_int(0), as_int(1), as_int(2)
+
+
 @dataclass
 class WorkExperience:
     company: str = ""
@@ -27,16 +42,24 @@ class WorkExperience:
 
     @classmethod
     def from_pdl(cls, exp: dict) -> "WorkExperience":
-        start = exp.get("start_date") or ""
-        end = exp.get("end_date") or ""
+        # dict.get(key, default) only applies default when the key is ABSENT;
+        # PDL can legitimately send "company": null, so guard with `or {}` too.
+        company = exp.get("company") or {}
+        title = exp.get("title") or {}
+        sy, sm, sd = _split_ymd(exp.get("start_date"))
+        ey, em, ed = _split_ymd(exp.get("end_date"))
         return cls(
-            company=exp.get("company", {}).get("name") or "",
-            company_linkedin_url=exp.get("company", {}).get("linkedin_url") or "",
-            title=exp.get("title", {}).get("name") or "",
+            company=company.get("name") or "",
+            company_linkedin_url=company.get("linkedin_url") or "",
+            title=title.get("name") or "",
             description="",
             location=(exp.get("location_names") or [""])[0] or "",
-            starts_at_year=int(start[:4]) if start[:4].isdigit() else None,
-            ends_at_year=int(end[:4]) if end[:4].isdigit() else None,
+            starts_at_year=sy,
+            starts_at_month=sm,
+            starts_at_day=sd,
+            ends_at_year=ey,
+            ends_at_month=em,
+            ends_at_day=ed,
             is_current=bool(exp.get("is_primary", False)),
         )
 
@@ -68,16 +91,17 @@ class Education:
 
     @classmethod
     def from_pdl(cls, edu: dict) -> "Education":
-        start = edu.get("start_date") or ""
-        end = edu.get("end_date") or ""
+        school = edu.get("school") or {}
+        sy, _, _ = _split_ymd(edu.get("start_date"))
+        ey, _, _ = _split_ymd(edu.get("end_date"))
         return cls(
-            school=edu.get("school", {}).get("name") or "",
-            school_linkedin_url=edu.get("school", {}).get("linkedin_url") or "",
+            school=school.get("name") or "",
+            school_linkedin_url=school.get("linkedin_url") or "",
             degree=(edu.get("degrees") or [""])[0] or "",
             field_of_study=(edu.get("majors") or [""])[0] or "",
             grade=edu.get("gpa") or "",
-            starts_at_year=int(start[:4]) if start[:4].isdigit() else None,
-            ends_at_year=int(end[:4]) if end[:4].isdigit() else None,
+            starts_at_year=sy,
+            ends_at_year=ey,
         )
 
 
@@ -173,7 +197,16 @@ class LinkedInProfile:
         }
 
         if not self.experiences and not self.education:
-            return [base]
+            row = dict(base)
+            row["record_type"] = "profile"
+            for k in (
+                "exp_index", "exp_company", "exp_company_linkedin_url", "exp_title",
+                "exp_description", "exp_location", "exp_start", "exp_end", "exp_is_current",
+                "edu_index", "edu_school", "edu_school_linkedin_url", "edu_degree",
+                "edu_field_of_study", "edu_grade", "edu_start_year", "edu_end_year",
+            ):
+                row[k] = ""
+            return [row]
 
         rows = []
         for i, exp in enumerate(self.experiences):

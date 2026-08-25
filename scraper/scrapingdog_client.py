@@ -102,7 +102,10 @@ class ScrapingdogClient:
                 return profile
 
             elif response.status == 429:
-                retry_after = int(response.headers.get("Retry-After", 30))
+                try:
+                    retry_after = int(response.headers.get("Retry-After", 30))
+                except (TypeError, ValueError):
+                    retry_after = 30
                 logger.warning("Scrapingdog rate limited, waiting %ds...", retry_after)
                 await asyncio.sleep(retry_after)
                 raise ScrapingdogRateLimitError("Rate limited (429)")
@@ -125,7 +128,7 @@ class ScrapingdogClient:
             is_current = (
                 "present" in str(exp.get("duration_end", "")).lower()
                 or "present" in str(exp.get("end_date", "")).lower()
-                or not exp.get("duration_end")
+                or (not exp.get("duration_end") and not exp.get("end_date"))
             )
             company = exp.get("company_name") or exp.get("company") or ""
             we = WorkExperience(

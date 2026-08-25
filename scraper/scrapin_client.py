@@ -94,7 +94,10 @@ class ScrapInClient:
                 return profile
 
             elif response.status == 429:
-                retry_after = int(response.headers.get("Retry-After", 30))
+                try:
+                    retry_after = int(response.headers.get("Retry-After", 30))
+                except (TypeError, ValueError):
+                    retry_after = 30
                 logger.warning("ScrapIn rate limited, waiting %ds...", retry_after)
                 await asyncio.sleep(retry_after)
                 raise ScrapInRateLimitError("Rate limited (429)")
@@ -118,8 +121,11 @@ class ScrapInClient:
     def _parse_response(self, linkedin_url: str, data: dict) -> LinkedInProfile:
         person = data.get("person") or data
 
+        positions = person.get("positions") or {}
+        schools = person.get("schools") or {}
+
         experiences = []
-        for exp in (person.get("positions", {}).get("positionHistory", []) or []):
+        for exp in (positions.get("positionHistory") or []):
             starts = exp.get("startedOn") or {}
             ends = exp.get("finishedOn") or {}
             we = WorkExperience(
@@ -137,7 +143,7 @@ class ScrapInClient:
             experiences.append(we)
 
         education = []
-        for edu in (person.get("schools", {}).get("educationHistory", []) or []):
+        for edu in (schools.get("educationHistory") or []):
             starts = edu.get("startedOn") or {}
             ends = edu.get("finishedOn") or {}
             ed = Education(
@@ -153,12 +159,13 @@ class ScrapInClient:
             )
             education.append(ed)
 
-        skills = [s.get("name", s) if isinstance(s, dict) else s
+        skills = [s.get("name") if isinstance(s, dict) else s
                   for s in (person.get("skills") or [])]
+        skills = [s for s in skills if s]
 
         return LinkedInProfile(
             linkedin_url=linkedin_url,
-            full_name=(person.get("firstName", "") + " " + person.get("lastName", "")).strip(),
+            full_name=((person.get("firstName") or "") + " " + (person.get("lastName") or "")).strip(),
             first_name=person.get("firstName") or "",
             last_name=person.get("lastName") or "",
             headline=person.get("headline") or "",

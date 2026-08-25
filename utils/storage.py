@@ -119,21 +119,34 @@ class Database:
         logger.info("Initialized %d URLs in job queue", len(urls))
 
     def get_pending_urls(self, limit: Optional[int] = None) -> list[str]:
+        # 'failed' (network/API/persist errors, exhausted fallback chain) is
+        # included so --resume naturally retries transient failures on the
+        # next run — the whole point of the multi-API fallback chain is
+        # resilience against exactly this. 'not_found' is intentionally
+        # excluded: it means every configured API explicitly reported no
+        # such profile, and re-asking won't change that.
         query = """
             SELECT linkedin_url FROM job_status
-            WHERE status IN ('pending', 'retry')
+            WHERE status IN ('pending', 'retry', 'failed')
             ORDER BY ROWID
         """
         if limit:
             query += f" LIMIT {limit}"
         with self._conn() as conn:
+            # Self-heal: a URL can be left at 'in_progress' forever if the
+            # process was killed between mark_in_progress() and save_profile().
+            # Without this, such URLs would be permanently invisible to every
+            # future --resume run. Requeue them as 'retry' before selecting.
+            conn.execute(
+                "UPDATE job_status SET status='retry' WHERE status='in_progress'"
+            )
             rows = conn.execute(query).fetchall()
         return [row["linkedin_url"] for row in rows]
 
     def get_stats(self) -> dict:
         with self._conn() as conn:
             stats = {}
-            for status in ("pending", "retry", "success", "failed", "not_found", "rate_limited"):
+            for status in ("pending", "retry", "in_progress", "success", "failed", "not_found", "rate_limited"):
                 count = conn.execute(
                     "SELECT COUNT(*) FROM job_status WHERE status = ?", (status,)
                 ).fetchone()[0]
@@ -193,10 +206,13 @@ class Database:
             ).fetchone()
             profile_id = profile_row["id"]
 
-            if profile.fetch_status == "success":
-                conn.execute("DELETE FROM experiences WHERE profile_id=?", (profile_id,))
-                conn.execute("DELETE FROM education WHERE profile_id=?", (profile_id,))
+            # Always clear stale child rows first so a profile that regresses
+            # from success to failed (e.g. retried after a transient error)
+            # never keeps orphaned experience/education rows attached to it.
+            conn.execute("DELETE FROM experiences WHERE profile_id=?", (profile_id,))
+            conn.execute("DELETE FROM education WHERE profile_id=?", (profile_id,))
 
+            if profile.fetch_status == "success":
                 for i, exp in enumerate(profile.experiences):
                     conn.execute(
                         """INSERT INTO experiences

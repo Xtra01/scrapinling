@@ -98,7 +98,10 @@ class LinkdAPIClient:
                 return profile
 
             elif response.status == 429:
-                retry_after = int(response.headers.get("Retry-After", 30))
+                try:
+                    retry_after = int(response.headers.get("Retry-After", 30))
+                except (TypeError, ValueError):
+                    retry_after = 30
                 logger.warning("LinkdAPI rate limited, waiting %ds...", retry_after)
                 await asyncio.sleep(retry_after)
                 raise LinkdAPIRateLimitError("Rate limited (429)")

@@ -107,7 +107,10 @@ class PDLClient:
                 return profile
 
             elif response.status == 429:
-                retry_after = int(response.headers.get("Retry-After", 30))
+                try:
+                    retry_after = int(response.headers.get("Retry-After", 30))
+                except (TypeError, ValueError):
+                    retry_after = 30
                 logger.warning("PDL rate limited, waiting %ds...", retry_after)
                 await asyncio.sleep(retry_after)
                 raise PDLRateLimitError("Rate limited (429)")
