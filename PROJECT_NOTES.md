@@ -1,6 +1,6 @@
 # LinkedIn Profile Scraper — Proje Notları & Devam Rehberi
 
-> Son güncelleme: 2026-08-25
+> Son güncelleme: 2026-08-26
 > Repo: `Xtra01/scrapinling` — branch: `claude/linkedin-profile-scraper-ejvUZ`
 > Amaç: 15.000 LinkedIn linkinden **tüm iş deneyimi + eğitim bilgilerini** yasal API'lerle eksiksiz çekmek.
 
@@ -220,3 +220,40 @@ Test suite'i çalıştırmak için: `pip install -r requirements-dev.txt && pyte
 - `.env` asla commit edilmez (`.gitignore`'da)
 - Proje MIT lisanslı, "Copyright (c) 2026 Xtra01"
 - `examples/sample_links.csv` ve `examples/sample_links.txt` — hazır örnek input dosyaları
+
+---
+
+## 8. Repo Tamlık Geçişi (2026-08-26)
+
+Kullanıcı "eksik kalan işleri tespit et, sonuna kadar götür" dediğinde, dış
+sistemlere (cloud data, "raklet" vb.) **hiç dokunulmadan** sadece bu repo
+üzerinde eksiksizlik denetimi yapıldı ve şu gerçek boşluklar kapatıldı:
+
+- **`main.py` ve `utils/progress.py` hiç test edilmiyordu** — gerçek iş
+  mantığı içermelerine rağmen (`_export_csv`, `_clean_key`, `ScraperStats`
+  oran/özet hesapları). `tests/test_main.py` (23 test, `click.testing.
+  CliRunner` ile CLI hata yollarını da kapsıyor) ve `tests/test_progress.py`
+  (15 test) eklendi. **Suite artık 273 test, hepsi yeşil.**
+- **`requirements.txt`'te 5 hiç kullanılmayan paket vardı**
+  (`aiofiles`, `asyncio-throttle`, `tqdm`, `pandas`, `pydantic`) — ilk
+  taslaktan kalma, kod hiçbirini import etmiyor. Grep ile doğrulandı, ayrıca
+  **sıfırdan venv kurup** hem `requirements.txt` hem `requirements-dev.txt`
+  ile temiz kurulumda tüm suite'in geçtiği kanıtlandı. `requirements-dev.txt`
+  ayrıca kullanılmayan `pytest-asyncio`'dan temizlendi (testler
+  `asyncio.run()` kullanıyor, pytest-asyncio marker'ı değil).
+- **`.github/workflows/tests.yml` eklendi** — her push/PR'da Python
+  3.10/3.11/3.12'de pytest suite + CLI smoke check çalıştırıyor. **Push
+  sonrası gerçekten tetiklendi ve GitHub'ın kendi runner'ında yeşil geçti**
+  (workflow run ID: 32926772031, conclusion: success) — sadece dosya
+  eklenip "çalışır varsayılmadı", fiilen doğrulandı.
+- **`main.py`'de yarım kalmış bir düzeltme tamamlandı**: önceki hata
+  düzeltme geçişinde `get_stats()`'e `in_progress` durumu eklenmişti ama
+  `_print_db_stats()` bunu hiç göstermiyordu. Artık "Yarıda kalmış" satırı
+  ayrıca gösteriliyor ve "Bekliyor" toplamına dahil ediliyor.
+- `.gitignore`'a `.pytest_cache/`, `.coverage`, `htmlcov/` eklendi.
+- README.md güncellendi: `--resume`'un "failed" URL'leri de tekrar deneme
+  davranışı, boş profillerde `record_type="profile"`, yeni Testler bölümü.
+
+Bu geçişten sonra repo GERÇEKTEN production-ready: 273 test yeşil (hem
+lokal hem GitHub Actions'ta doğrulandı), bağımlılıklar minimal ve doğru,
+CI otomatik çalışıyor, CLI'ın tüm hata yolları test kapsamında.
