@@ -61,9 +61,11 @@ python main.py scrape --input links.csv
 python main.py scrape --input links.csv --concurrency 10
 
 # Kaldığı yerden devam (varsayılan açık)
+# pending/retry/in_progress (yarıda kalmış) VE failed (geçici hata) URL'leri
+# tekrar dener; sadece success ve not_found atlanır.
 python main.py scrape --input links.csv --resume
 
-# Baştan başla
+# Baştan başla (her URL'yi, durumu ne olursa olsun yeniden işler)
 python main.py scrape --input links.csv --no-resume
 
 # İlerlemeyi gör
@@ -93,7 +95,10 @@ https://www.linkedin.com/in/janedoe
 ## Output
 
 ### `data/output/profiles.csv` — Excel uyumlu
-Her satır bir iş deneyimi VEYA eğitim kaydı, `record_type` sütunundan ayırt edilir.
+Her satır bir iş deneyimi VEYA eğitim kaydı, `record_type` sütunundan ayırt edilir
+(`experience` / `education`). Hiç deneyim veya eğitim bulunamayan ya da fetch
+başarısız olan profiller için tek satır yazılır ve `record_type` değeri `profile`
+olur.
 
 ### `data/output/profiles.jsonl` — JSON Lines
 Her satır tam profil (tüm alanlar, nested experiences[]/education[] dahil).
@@ -119,12 +124,27 @@ Her satır tam profil (tüm alanlar, nested experiences[]/education[] dahil).
 │   ├── storage.py               SQLite + CSV + JSON yazıcıları
 │   ├── validators.py            URL doğrulama + input yükleme
 │   └── progress.py              Rich progress bar
+├── tests/                       273 pytest testi (network gerektirmez)
+├── examples/                    Örnek input dosyaları
 ├── PROJECT_NOTES.md              Detaylı proje geçmişi ve devam rehberi
 ├── .env.example                 API anahtar şablonu
-└── requirements.txt
+├── requirements.txt
+└── requirements-dev.txt         + pytest, aioresponses
 ```
 
 Ayrıntılı araştırma notları, mimari kararlar, bilinen riskler ve devam rehberi için **`PROJECT_NOTES.md`** dosyasına bakın.
+
+## Testler
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+
+273 test — modeller, URL doğrulama, SQLite/CSV/JSON depolama ve tüm 7 API
+client'ının parse mantığı için gerçekçi mock verilerle, gerçek ağ isteği olmadan.
+Her push'ta GitHub Actions ile otomatik çalışır (`.github/workflows/tests.yml`,
+Python 3.10/3.11/3.12).
 
 ## Lisans
 

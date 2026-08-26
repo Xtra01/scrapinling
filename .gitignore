@@ -43,6 +43,11 @@ data/cache/
 # Logs
 logs/*.log
 
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
 # IDE
 .vscode/
 .idea/

@@ -297,13 +297,19 @@ def _print_api_config(brightdata, scrapingdog, netrows, linkdapi, pdl, scrapin, 
 
 def _print_db_stats(db):
     stats = db.get_stats()
+    stuck = stats.get("in_progress", 0)
     table = Table(title="Scraping İlerlemesi", show_header=True, header_style="bold cyan")
     table.add_column("Durum", style="bold")
     table.add_column("Sayı", justify="right")
     table.add_row("[green]Başarılı[/green]",  f"[green]{stats.get('success', 0):,}[/green]")
     table.add_row("[red]Başarısız[/red]",     f"[red]{stats.get('failed', 0):,}[/red]")
     table.add_row("[yellow]Bulunamadı[/yellow]", f"[yellow]{stats.get('not_found', 0):,}[/yellow]")
-    table.add_row("Bekliyor", str(stats.get("pending", 0) + stats.get("retry", 0)))
+    table.add_row("Bekliyor", str(stats.get("pending", 0) + stats.get("retry", 0) + stuck))
+    if stuck:
+        table.add_row(
+            "[orange3]Yarıda kalmış[/orange3]",
+            f"[orange3]{stuck:,}[/orange3] (bir sonraki --resume'da otomatik devam eder)",
+        )
     table.add_row("[bold]Toplam[/bold]", f"[bold]{sum(stats.values()):,}[/bold]")
     console.print(table)
 
